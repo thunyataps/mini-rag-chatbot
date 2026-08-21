@@ -11,10 +11,16 @@ type ChunkWithDocumentRow = {
   document_id: string;
   chunk_index: number;
   content: string;
-  embedding: number[];
+  // PostgREST serializes pgvector `vector` columns as their text form
+  // (e.g. "[0.1,-0.2,...]"), so supabase-js hands this back as a JSON
+  // string, not a parsed array - see the parse in fetchChunkPoints.
+  embedding: number[] | string;
   cluster_id: string | null;
   documents: { name: string; session_id: string };
 };
+
+/** all-MiniLM-L6-v2 (see src/lib/rag/embeddings.ts) is always 384-dimensional. */
+const EMBEDDING_DIMENSIONS = 384;
 
 export async function fetchChunkPoints(sessionId: string): Promise<ChunkPoint[]> {
   const { data, error } = await supabase
@@ -25,15 +31,29 @@ export async function fetchChunkPoints(sessionId: string): Promise<ChunkPoint[]>
     .eq("documents.session_id", sessionId);
   if (error) throw new Error(error.message);
 
-  return ((data ?? []) as unknown as ChunkWithDocumentRow[]).map((row) => ({
-    id: row.id,
-    documentId: row.document_id,
-    documentName: row.documents.name,
-    chunkIndex: row.chunk_index,
-    content: row.content,
-    embedding: row.embedding,
-    clusterId: row.cluster_id,
-  }));
+  return ((data ?? []) as unknown as ChunkWithDocumentRow[]).map((row) => {
+    const embedding =
+      typeof row.embedding === "string" ? (JSON.parse(row.embedding) as number[]) : row.embedding;
+    // Cheap invariant: a malformed/unparsed embedding would otherwise poison
+    // every downstream distance calculation with NaN, silently (no throw) -
+    // producing zero similarity edges and a single k-means cluster.
+    if (!Array.isArray(embedding) || embedding.length !== EMBEDDING_DIMENSIONS) {
+      throw new Error(
+        `Expected ${EMBEDDING_DIMENSIONS}-dim embedding, got ${
+          Array.isArray(embedding) ? embedding.length : typeof embedding
+        }`
+      );
+    }
+    return {
+      id: row.id,
+      documentId: row.document_id,
+      documentName: row.documents.name,
+      chunkIndex: row.chunk_index,
+      content: row.content,
+      embedding,
+      clusterId: row.cluster_id,
+    };
+  });
 }
 
 /** Stale if clustering has never run for this session, or if any chunk has
@@ -92,7 +112,19 @@ export async function recomputeClusters(sessionId: string, chunks: ChunkPoint[])
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error ?? "cluster-labels failed");
-    labels = data.labels;
+    // Reconcile the model's answer against the clusters we actually computed:
+    // a missing/malformed `labels`, a label for a hallucinated cluster id, or
+    // a cluster the model skipped must never reach the inserts below (and a
+    // malformed response must not throw outside this try - labeling failure
+    // may never block the graph from rendering).
+    const returned: { id: number; label: string }[] = Array.isArray(data.labels)
+      ? data.labels
+      : [];
+    const labelById = new Map(returned.map((l) => [l.id, l.label]));
+    labels = clusterSamples.map((c) => ({
+      id: c.id,
+      label: labelById.get(c.id) ?? `Cluster ${c.id + 1}`,
+    }));
   } catch (err) {
     console.error("Cluster labeling failed, using generic labels:", err);
     labels = clusterSamples.map((c) => ({ id: c.id, label: `Cluster ${c.id + 1}` }));
@@ -146,8 +178,13 @@ export async function fetchGraphData(sessionId: string): Promise<GraphData> {
     return { nodes: [], links: [], clusters: [] };
   }
 
+  // Only re-read the chunks when a recompute actually rewrote their
+  // cluster_id values - on the (common) cache-hit path the already-fetched
+  // rows are current, and embeddings are a few KB each as text.
+  let freshChunks = chunks;
   if (await needsRecompute(sessionId, chunks)) {
     await recomputeClusters(sessionId, chunks);
+    freshChunks = await fetchChunkPoints(sessionId);
   }
 
   const { data: clusterRows, error: clusterErr } = await supabase
@@ -162,8 +199,6 @@ export async function fetchGraphData(sessionId: string): Promise<GraphData> {
     colorIndex: r.color_index,
   }));
   const clusterById = new Map(clusters.map((c) => [c.id, c]));
-
-  const freshChunks = await fetchChunkPoints(sessionId);
 
   const documentIds = [...new Set(freshChunks.map((c) => c.documentId))];
   const documentNodes: GraphNode[] = documentIds.map((docId) => ({
