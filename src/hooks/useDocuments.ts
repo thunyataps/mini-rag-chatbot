@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { chunkText } from "@/lib/rag/chunk";
 import { embedText, embedTexts } from "@/lib/rag/embeddings";
 import { supabase } from "@/lib/supabase/client";
-import { getSessionId } from "@/lib/session";
+import { useAuth } from "@/hooks/useAuth";
 import type { DocumentRecord, RetrievedChunk } from "@/lib/rag/types";
 
 const TOP_K = 3;
@@ -42,13 +42,14 @@ type MatchChunksBySessionRow = MatchChunksRow & {
  * by hand in JS, just as a SQL query - which is what lets it scale past
  * memory and survive a refresh.
  *
- * By default retrieval searches across every document in this session
- * (match_chunks_by_session) rather than one you have to pick first -
+ * By default retrieval searches across every document the caller can see
+ * (match_chunks_for_caller) rather than one you have to pick first -
  * whichever file (or files) actually contain the relevant chunks wins,
  * so an answer can draw on more than one document at once. Scoping to a
  * single file (match_chunks) is available as a filter, not a requirement.
  */
 export function useDocuments() {
+  const { user } = useAuth();
   const [documents, setDocuments] = useState<DocumentRecord[]>([]);
   const [searchScope, setSearchScope] = useState<SearchScope>("all");
   const [isLoadingDocuments, setIsLoadingDocuments] = useState(true);
@@ -57,11 +58,9 @@ export function useDocuments() {
   const [isAsking, setIsAsking] = useState(false);
 
   const refreshDocuments = useCallback(async () => {
-    const sessionId = getSessionId();
     const { data, error } = await supabase
       .from("documents")
       .select("id, name, created_at")
-      .eq("session_id", sessionId)
       .order("created_at", { ascending: false });
 
     if (error) throw new Error(error.message);
@@ -76,6 +75,7 @@ export function useDocuments() {
   }, []);
 
   useEffect(() => {
+    if (!user) return;
     let cancelled = false;
 
     async function load() {
@@ -90,7 +90,7 @@ export function useDocuments() {
     return () => {
       cancelled = true;
     };
-  }, [refreshDocuments]);
+  }, [refreshDocuments, user]);
 
   const uploadDocument = useCallback(
     async (name: string, text: string) => {
@@ -107,11 +107,9 @@ export function useDocuments() {
       setIsUploading(true);
       setUploadProgress({ done: 0, total: rawChunks.length });
       try {
-        const sessionId = getSessionId();
-
         const { data: doc, error: docError } = await supabase
           .from("documents")
-          .insert({ session_id: sessionId, name })
+          .insert({ user_id: user!.id, name })
           .select("id, name, created_at")
           .single();
         if (docError) throw new Error(docError.message);
@@ -136,7 +134,7 @@ export function useDocuments() {
         setIsUploading(false);
       }
     },
-    [refreshDocuments]
+    [refreshDocuments, user]
   );
 
   const askQuestion = useCallback(
@@ -157,9 +155,8 @@ export function useDocuments() {
 
         let sources: RetrievedChunk[];
         if (searchScope === "all") {
-          const { data, error } = await supabase.rpc("match_chunks_by_session", {
+          const { data, error } = await supabase.rpc("match_chunks_for_caller", {
             query_embedding: queryEmbedding,
-            match_session_id: getSessionId(),
             match_count: TOP_K,
           });
           if (error) throw new Error(error.message);

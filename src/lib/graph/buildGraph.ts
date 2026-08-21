@@ -16,19 +16,18 @@ type ChunkWithDocumentRow = {
   // string, not a parsed array - see the parse in fetchChunkPoints.
   embedding: number[] | string;
   cluster_id: string | null;
-  documents: { name: string; session_id: string };
+  documents: { name: string };
 };
 
 /** all-MiniLM-L6-v2 (see src/lib/rag/embeddings.ts) is always 384-dimensional. */
 const EMBEDDING_DIMENSIONS = 384;
 
-export async function fetchChunkPoints(sessionId: string): Promise<ChunkPoint[]> {
+export async function fetchChunkPoints(): Promise<ChunkPoint[]> {
   const { data, error } = await supabase
     .from("chunks")
     .select(
-      "id, document_id, chunk_index, content, embedding, cluster_id, documents!inner(name, session_id)"
-    )
-    .eq("documents.session_id", sessionId);
+      "id, document_id, chunk_index, content, embedding, cluster_id, documents!inner(name)"
+    );
   if (error) throw new Error(error.message);
 
   return ((data ?? []) as unknown as ChunkWithDocumentRow[]).map((row) => {
@@ -56,16 +55,16 @@ export async function fetchChunkPoints(sessionId: string): Promise<ChunkPoint[]>
   });
 }
 
-/** Stale if clustering has never run for this session, or if any chunk has
+/** Stale if clustering has never run for this user, or if any chunk has
  * never been assigned a cluster (i.e. a document was filed since the last
  * run). Simpler and more robust than comparing timestamps. */
-export async function needsRecompute(sessionId: string, chunks: ChunkPoint[]): Promise<boolean> {
+export async function needsRecompute(userId: string, chunks: ChunkPoint[]): Promise<boolean> {
   if (chunks.length === 0) return false;
 
   const { data, error } = await supabase
     .from("graph_state")
     .select("last_clustered_at")
-    .eq("session_id", sessionId)
+    .eq("user_id", userId)
     .maybeSingle();
   if (error) throw new Error(error.message);
   if (!data) return true;
@@ -73,7 +72,7 @@ export async function needsRecompute(sessionId: string, chunks: ChunkPoint[]): P
   return chunks.some((c) => c.clusterId === null);
 }
 
-export async function recomputeClusters(sessionId: string, chunks: ChunkPoint[]): Promise<void> {
+export async function recomputeClusters(userId: string, chunks: ChunkPoint[]): Promise<void> {
   if (chunks.length < 2) return;
 
   const k = Math.min(8, Math.max(2, Math.round(Math.sqrt(chunks.length / 2))));
@@ -130,7 +129,7 @@ export async function recomputeClusters(sessionId: string, chunks: ChunkPoint[])
     labels = clusterSamples.map((c) => ({ id: c.id, label: `Cluster ${c.id + 1}` }));
   }
 
-  const { error: deleteError } = await supabase.from("clusters").delete().eq("session_id", sessionId);
+  const { error: deleteError } = await supabase.from("clusters").delete().eq("user_id", userId);
   if (deleteError) throw new Error(deleteError.message);
 
   const clusterIndexToDbId = new Map<number, string>();
@@ -138,7 +137,7 @@ export async function recomputeClusters(sessionId: string, chunks: ChunkPoint[])
     const { data: row, error } = await supabase
       .from("clusters")
       .insert({
-        session_id: sessionId,
+        user_id: userId,
         label,
         color_index: clusterIndex % CLUSTER_PALETTE.length,
       })
@@ -161,19 +160,19 @@ export async function recomputeClusters(sessionId: string, chunks: ChunkPoint[])
 
   const { error: upsertError } = await supabase
     .from("graph_state")
-    .upsert({ session_id: sessionId, last_clustered_at: new Date().toISOString() });
+    .upsert({ user_id: userId, last_clustered_at: new Date().toISOString() });
   if (upsertError) throw new Error(upsertError.message);
 }
 
 /** Used by the "Re-analyze" button - fetches fresh chunk data and always
  * recomputes, regardless of staleness. */
-export async function forceRecompute(sessionId: string): Promise<void> {
-  const chunks = await fetchChunkPoints(sessionId);
-  await recomputeClusters(sessionId, chunks);
+export async function forceRecompute(userId: string): Promise<void> {
+  const chunks = await fetchChunkPoints();
+  await recomputeClusters(userId, chunks);
 }
 
-export async function fetchGraphData(sessionId: string): Promise<GraphData> {
-  const chunks = await fetchChunkPoints(sessionId);
+export async function fetchGraphData(userId: string): Promise<GraphData> {
+  const chunks = await fetchChunkPoints();
   if (chunks.length === 0) {
     return { nodes: [], links: [], clusters: [] };
   }
@@ -182,15 +181,15 @@ export async function fetchGraphData(sessionId: string): Promise<GraphData> {
   // cluster_id values - on the (common) cache-hit path the already-fetched
   // rows are current, and embeddings are a few KB each as text.
   let freshChunks = chunks;
-  if (await needsRecompute(sessionId, chunks)) {
-    await recomputeClusters(sessionId, chunks);
-    freshChunks = await fetchChunkPoints(sessionId);
+  if (await needsRecompute(userId, chunks)) {
+    await recomputeClusters(userId, chunks);
+    freshChunks = await fetchChunkPoints();
   }
 
   const { data: clusterRows, error: clusterErr } = await supabase
     .from("clusters")
     .select("id, label, color_index")
-    .eq("session_id", sessionId);
+    .eq("user_id", userId);
   if (clusterErr) throw new Error(clusterErr.message);
 
   const clusters: ClusterRow[] = (clusterRows ?? []).map((r) => ({

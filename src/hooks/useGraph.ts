@@ -2,10 +2,11 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { fetchGraphData, forceRecompute } from "@/lib/graph/buildGraph";
-import { getSessionId } from "@/lib/session";
+import { useAuth } from "@/hooks/useAuth";
 import type { GraphData } from "@/lib/graph/types";
 
 export function useGraph() {
+  const { user } = useAuth();
   const [data, setData] = useState<GraphData | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isRecomputing, setIsRecomputing] = useState(false);
@@ -14,14 +15,15 @@ export function useGraph() {
   const load = useCallback(async () => {
     setError(null);
     try {
-      const graph = await fetchGraphData(getSessionId());
+      const graph = await fetchGraphData(user!.id);
       setData(graph);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load graph");
     }
-  }, []);
+  }, [user]);
 
   useEffect(() => {
+    if (!user) return;
     let cancelled = false;
     (async () => {
       setIsLoading(true);
@@ -31,20 +33,20 @@ export function useGraph() {
     return () => {
       cancelled = true;
     };
-  }, [load]);
+  }, [load, user]);
 
   const recompute = useCallback(async () => {
     setIsRecomputing(true);
     setError(null);
     try {
-      await forceRecompute(getSessionId());
+      await forceRecompute(user!.id);
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to re-analyze");
     } finally {
       setIsRecomputing(false);
     }
-  }, [load]);
+  }, [load, user]);
 
   return { data, isLoading, isRecomputing, error, recompute };
 }
