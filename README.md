@@ -11,6 +11,8 @@ Live demo: https://mini-rag-chatbot-liart.vercel.app
 
 ## What it does
 
+- **Sign in** with email + password or Google (Supabase Auth). Everything
+  you file is scoped to your account by Postgres Row Level Security.
 - Upload **PDF, Excel (.xlsx/.xls), CSV, or plain text (.txt/.md)** — all
   parsed client-side, nothing uploaded raw to a server.
 - Ask questions and get **streamed** answers grounded only in what you
@@ -22,6 +24,30 @@ Live demo: https://mini-rag-chatbot-liart.vercel.app
   and their chunks relate: chunks are auto-clustered into topics (labeled
   by one batched Gemini call, not one per cluster) and cross-document
   similarity links show which files talk about the same thing.
+
+## Accounts and access
+
+Login is required — every page except `/login` and `/auth/callback` is
+gated by `src/proxy.ts`, and both API routes reject unauthenticated
+requests themselves. Two ways in, both through Supabase Auth:
+
+- **Email + password** (email confirmation link → `/auth/callback`)
+- **Google OAuth** (also lands on `/auth/callback`)
+
+Access control is enforced in the database, not in the client: RLS policies
+on `documents` and `chunks` compare `auth.uid()` to `documents.user_id`, so
+one user's documents are invisible to another no matter what the browser
+asks for.
+
+**One caveat, stated plainly:** documents filed *before* this login system
+existed have `user_id is null` ("legacy" documents). They are readable by
+**every signed-in user**, and writable by none — they can't be edited,
+deleted, or clustered. Sign-up is self-serve, so anyone who creates an
+account on this deployment can read those pre-existing documents. This is
+an intentional, accepted tradeoff for a portfolio project (it keeps the
+pre-auth demo content visible rather than orphaning it); nothing filed
+since auth landed is ever shared this way. If you're deploying your own
+copy, either start with an empty database or delete the legacy rows.
 
 ## How RAG works here
 
@@ -48,10 +74,11 @@ Live demo: https://mini-rag-chatbot-liart.vercel.app
    embed the question        same model, same vector space
         │
         ▼
-   cosine-similarity search  match_chunks_by_session() SQL function
-   across every document     (pgvector's <=> operator; match_chunks()
-   in the session            scopes to one document instead, used when
-        │                     filtering to a single file)
+   cosine-similarity search  match_chunks_for_caller() SQL function
+   across every document     (pgvector's <=> operator; RLS scopes the rows
+   you can see               to your own documents; match_chunks() scopes
+        │                     to one document instead, used when filtering
+        │                     to a single file)
         ▼
    send question + top       src/lib/gemini.ts + app/api/chat/route.ts
    matches to the LLM,       (Gemini, streamed token by token, with a
@@ -81,7 +108,10 @@ before failing, so a single busy model doesn't take the app down.
 Clustering runs client-side, cached in Supabase so re-opening the page
 doesn't re-spend Gemini quota:
 
-1. Fetch every chunk + embedding for the session.
+1. Fetch every chunk + embedding you can see (RLS does the scoping).
+   Legacy documents (see [Accounts and access](#accounts-and-access)) are
+   read-only, so their chunks are never clustered — they appear in the
+   graph in a neutral color instead.
 2. Run k-means (`src/lib/graph/kmeans.ts`, plain JS, no ML library) to
    group chunks into topics.
 3. Send the 3 most-central chunks per cluster to `/api/cluster-labels` in
@@ -127,20 +157,29 @@ Open http://localhost:3000.
 
 ### Database setup
 
-Run `supabase/schema.sql` once in the Supabase SQL Editor (safe to re-run —
-every statement is idempotent). It:
+Run `supabase/schema.sql` once in the Supabase SQL Editor. It:
 - enables the `pgvector` extension
 - creates `documents` and `chunks` tables (384-dim embeddings, matching `all-MiniLM-L6-v2`)
-- creates `match_chunks()` (single-document) and `match_chunks_by_session()`
-  (searches everything you've filed) — the RPCs used for retrieval
+- creates `match_chunks()` (single-document) and `match_chunks_for_caller()`
+  (searches everything you've filed — it takes no id parameter; RLS scopes
+  the visible rows automatically) — the RPCs used for retrieval
 - creates `clusters` and `graph_state` tables for the knowledge graph, and
   a `cluster_id` column on `chunks`
-- sets permissive Row Level Security policies scoped only by a
-  client-generated session id (`src/lib/session.ts`) — there's no login
-  system in this project, so **don't upload sensitive documents**; this is
-  a portfolio/learning project, not a document store with real access
-  control. (The `documents`/`chunks` DELETE policies exist only for
-  maintenance/test-cleanup scripts — the app itself never deletes either.)
+- sets Row Level Security policies keyed on `auth.uid()`, so each account
+  sees only its own documents — plus the read-only legacy rows described
+  under [Accounts and access](#accounts-and-access)
+
+Re-running the file is safe in the sense that every statement is idempotent
+in its final effect, but note that the `clusters` / `graph_state` section
+resets the cached clustering (a "Re-analyze" click regenerates it).
+Documents and chunks are never touched.
+
+You'll also need to enable the auth providers in the Supabase dashboard:
+Authentication → Providers → Email (on by default) and Google (add your
+Google OAuth client id/secret), with
+`https://<your-project>.supabase.co/auth/v1/callback` as the authorized
+redirect URI on the Google side, and your app's `/auth/callback` added
+under Authentication → URL Configuration → Redirect URLs.
 
 ## Known limitations
 
@@ -175,17 +214,22 @@ src/
   lib/rag/types.ts            shared RAG types
   lib/files/extractText.ts    client-side PDF/Excel/CSV/text -> text
   lib/supabase/client.ts      Supabase browser client
-  lib/session.ts              per-browser session id (localStorage)
+  lib/supabase/server.ts      Supabase server client (cookie-backed session)
+  lib/supabase/middleware.ts  session refresh + public/private path gating
+  proxy.ts                     redirects unauthenticated requests to /login
   lib/gemini.ts                shared Gemini client + model-fallback chain
   lib/graph/kmeans.ts          plain-JS k-means clustering
   lib/graph/edges.ts           cosine similarity + similarity-edge computation
   lib/graph/palette.ts         cluster color palette
   lib/graph/types.ts           shared knowledge-graph types
   lib/graph/buildGraph.ts      graph orchestration: fetch, cluster, cache, assemble
+  hooks/useAuth.tsx            auth context: current user + signOut
   hooks/useDocuments.ts        upload/index/ask flow - the RAG pipeline glue
   hooks/useGraph.ts            knowledge-graph data + recompute hook
   app/api/chat/route.ts        calls Gemini, streams the answer back
   app/api/cluster-labels/route.ts  batched Gemini call for cluster topic labels
+  app/auth/callback/route.ts   exchanges an OAuth/email-confirm code for a session
+  app/login/page.tsx           sign in / sign up (email+password, Google)
   app/page.tsx                 main UI
   app/graph/page.tsx            3D knowledge graph page
 supabase/schema.sql            tables, pgvector, RPCs, RLS policies
