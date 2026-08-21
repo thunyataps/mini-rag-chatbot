@@ -9,10 +9,11 @@ import type { DocumentRecord, RetrievedChunk } from "@/lib/rag/types";
 
 const TOP_K = 3;
 
-// ~150ms/chunk in the worker is a reasonable worst case, so this caps
-// indexing time at roughly 2 minutes even for very large files (e.g. a
-// multi-thousand-row spreadsheet dumped to CSV).
-const MAX_CHUNKS = 800;
+// Embedding still runs on the main thread (see embeddings.ts), just no
+// longer freezing it solid - so this cap is about bounding worst-case
+// wait time (~150ms/chunk => ~5 min at the cap), not about avoiding a
+// freeze. Raise it further if legitimate documents keep hitting it.
+const MAX_CHUNKS = 2000;
 
 /** "all" searches across every filed document; a document id scopes to just that one. */
 export type SearchScope = "all" | string;
