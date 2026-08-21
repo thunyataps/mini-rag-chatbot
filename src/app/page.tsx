@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRef, useState } from "react";
 import { useDocuments } from "@/hooks/useDocuments";
 import { ACCEPTED_FILE_TYPES, extractText } from "@/lib/files/extractText";
@@ -100,6 +101,12 @@ export default function Home() {
             best-matching cards across everything you&apos;ve filed — no need to
             pick a file first.
           </p>
+          <Link
+            href="/graph"
+            className="mt-1 self-start font-mono text-[11px] text-stamp underline decoration-dotted underline-offset-2 hover:text-ink"
+          >
+            View the knowledge graph →
+          </Link>
         </header>
 
         {/* ---------- 1. intake tray ---------- */}
