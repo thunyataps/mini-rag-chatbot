@@ -110,3 +110,49 @@ create policy "anon can insert chunks" on chunks
 drop policy if exists "anon can read chunks" on chunks;
 create policy "anon can read chunks" on chunks
   for select to anon using (true);
+
+-- 8. Knowledge graph: semantic clusters over a session's chunks, and a
+-- watermark of when they were last computed (see src/lib/graph/buildGraph.ts).
+create table if not exists clusters (
+  id uuid primary key default gen_random_uuid(),
+  session_id uuid not null,
+  label text not null,
+  color_index int not null,
+  created_at timestamptz not null default now()
+);
+
+alter table chunks add column if not exists cluster_id uuid references clusters(id) on delete set null;
+
+create table if not exists graph_state (
+  session_id uuid primary key,
+  last_clustered_at timestamptz not null
+);
+
+create index if not exists clusters_session_id_idx on clusters (session_id);
+
+alter table clusters enable row level security;
+alter table graph_state enable row level security;
+
+drop policy if exists "anon can insert clusters" on clusters;
+create policy "anon can insert clusters" on clusters
+  for insert to anon with check (true);
+drop policy if exists "anon can read clusters" on clusters;
+create policy "anon can read clusters" on clusters
+  for select to anon using (true);
+drop policy if exists "anon can delete clusters" on clusters;
+create policy "anon can delete clusters" on clusters
+  for delete to anon using (true);
+
+drop policy if exists "anon can update chunks" on chunks;
+create policy "anon can update chunks" on chunks
+  for update to anon using (true) with check (true);
+
+drop policy if exists "anon can upsert graph_state" on graph_state;
+create policy "anon can upsert graph_state" on graph_state
+  for insert to anon with check (true);
+drop policy if exists "anon can update graph_state" on graph_state;
+create policy "anon can update graph_state" on graph_state
+  for update to anon using (true) with check (true);
+drop policy if exists "anon can read graph_state" on graph_state;
+create policy "anon can read graph_state" on graph_state
+  for select to anon using (true);
