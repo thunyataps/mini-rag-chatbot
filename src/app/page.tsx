@@ -3,12 +3,14 @@
 import Link from "next/link";
 import { useRef, useState } from "react";
 import { useDocuments } from "@/hooks/useDocuments";
+import { useAuth } from "@/hooks/useAuth";
 import { ACCEPTED_FILE_TYPES, extractText } from "@/lib/files/extractText";
 import type { RetrievedChunk } from "@/lib/rag/types";
 
 const MAX_FILE_BYTES = 15 * 1024 * 1024; // 15 MB
 
 export default function Home() {
+  const { user, signOut } = useAuth();
   const {
     documents,
     searchScope,
@@ -101,12 +103,20 @@ export default function Home() {
             best-matching cards across everything you&apos;ve filed — no need to
             pick a file first.
           </p>
-          <Link
-            href="/graph"
-            className="mt-1 self-start font-mono text-[11px] text-stamp underline decoration-dotted underline-offset-2 hover:text-ink"
-          >
-            View the knowledge graph →
-          </Link>
+          <div className="mt-1 flex items-center justify-between gap-2">
+            <Link
+              href="/graph"
+              className="font-mono text-[11px] text-stamp underline decoration-dotted underline-offset-2 hover:text-ink"
+            >
+              View the knowledge graph →
+            </Link>
+            <div className="flex items-center gap-2 font-mono text-[11px] text-ink-soft">
+              {user?.email}
+              <button onClick={() => signOut()} className="underline decoration-dotted underline-offset-2 hover:text-ink">
+                Sign out
+              </button>
+            </div>
+          </div>
         </header>
 
         {/* ---------- 1. intake tray ---------- */}
