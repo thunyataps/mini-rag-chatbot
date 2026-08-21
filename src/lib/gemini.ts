@@ -1,3 +1,7 @@
+// This module holds the server-side GEMINI_API_KEY; importing it from a
+// client component is a build error rather than a leaked key.
+import "server-only";
+
 import { GoogleGenAI } from "@google/genai";
 
 export const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });

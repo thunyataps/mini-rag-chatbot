@@ -103,6 +103,9 @@ create policy "anon can insert documents" on documents
 drop policy if exists "anon can read documents" on documents;
 create policy "anon can read documents" on documents
   for select to anon using (true);
+-- The two delete policies below exist for maintenance/test-cleanup scripts
+-- (run via the Supabase Management API or the SQL editor), not for any in-app
+-- delete flow - the app itself never deletes a document or chunk.
 drop policy if exists "anon can delete documents" on documents;
 create policy "anon can delete documents" on documents
   for delete to anon using (true);
