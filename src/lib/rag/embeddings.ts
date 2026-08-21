@@ -9,6 +9,19 @@
  * We use Transformers.js to run a small embedding model (all-MiniLM-L6-v2)
  * entirely in the browser via WebAssembly/WebGPU - no separate embedding
  * API, no server round-trip, and it's free.
+ *
+ * Ideally this would run in a Web Worker so it never touches the main
+ * thread at all. That was tried here - `new Worker(new URL("./embeddings.worker.ts",
+ * import.meta.url))` - but as of Next.js 16.3.1, Turbopack doesn't bundle
+ * that pattern for production builds; it copies the worker file's raw
+ * TypeScript source as a static asset instead of compiling it, so the
+ * browser can't execute it (confirmed by inspecting the actual build
+ * output - a matching open issue exists upstream). Until that's fixed,
+ * embedding runs on the main thread, with an explicit yield back to the
+ * event loop between chunks (see embedTexts) so the page can still repaint
+ * and respond to input between inference calls, instead of one long,
+ * uninterrupted freeze - plus a hard chunk-count cap (see useDocuments.ts)
+ * so no single document can block the page indefinitely.
  */
 
 "use client";
@@ -42,6 +55,11 @@ function getExtractor(): Promise<Extractor> {
   return extractorPromise;
 }
 
+/** Hands control back to the browser (paint, input, etc.) before continuing. */
+function yieldToMainThread(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 /** Embed a single piece of text (e.g. the user's question). */
 export async function embedText(text: string): Promise<number[]> {
   const extractor = await getExtractor();
@@ -51,7 +69,9 @@ export async function embedText(text: string): Promise<number[]> {
 
 /**
  * Embed many chunks in sequence, reporting progress as we go (useful for a
- * loading indicator while a whole document is being indexed).
+ * loading indicator while a whole document is being indexed). Yields to
+ * the browser between chunks so the page stays interactive - see the
+ * module-level comment above for why this isn't a Web Worker (yet).
  */
 export async function embedTexts(
   texts: string[],
@@ -64,6 +84,7 @@ export async function embedTexts(
     const output = await extractor(texts[i], { pooling: "mean", normalize: true });
     results.push(Array.from(output.data));
     onProgress?.(i + 1, texts.length);
+    await yieldToMainThread();
   }
 
   return results;

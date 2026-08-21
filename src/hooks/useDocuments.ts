@@ -9,6 +9,11 @@ import type { DocumentRecord, RetrievedChunk } from "@/lib/rag/types";
 
 const TOP_K = 3;
 
+// ~150ms/chunk in the worker is a reasonable worst case, so this caps
+// indexing time at roughly 2 minutes even for very large files (e.g. a
+// multi-thousand-row spreadsheet dumped to CSV).
+const MAX_CHUNKS = 800;
+
 /** "all" searches across every filed document; a document id scopes to just that one. */
 export type SearchScope = "all" | string;
 
@@ -91,6 +96,11 @@ export function useDocuments() {
       const rawChunks = chunkText(text);
       if (rawChunks.length === 0) {
         throw new Error("Document is empty");
+      }
+      if (rawChunks.length > MAX_CHUNKS) {
+        throw new Error(
+          `This document is too large to index (${rawChunks.length} chunks, limit ${MAX_CHUNKS}) — try a shorter file or split it up.`
+        );
       }
 
       setIsUploading(true);
