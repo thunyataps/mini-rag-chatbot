@@ -137,8 +137,6 @@ create table if not exists graph_state (
   last_clustered_at timestamptz not null
 );
 
-create index if not exists clusters_session_id_idx on clusters (session_id);
-
 alter table clusters enable row level security;
 alter table graph_state enable row level security;
 
@@ -165,3 +163,166 @@ create policy "anon can update graph_state" on graph_state
 drop policy if exists "anon can read graph_state" on graph_state;
 create policy "anon can read graph_state" on graph_state
   for select to anon using (true);
+
+-- 9. Auth: documents get a real owner. NULL means "filed before login
+-- existed" - visible to every authenticated user, editable/deletable by
+-- none (there's no real owner to authorize a change).
+alter table documents add column if not exists user_id uuid references auth.users(id) on delete cascade;
+
+-- session_id is retired as of this migration (Task 7 in the auth-login plan
+-- inserts documents with only user_id/name, never session_id) - drop the
+-- leftover NOT NULL so those inserts don't fail. The column itself is left
+-- in place (not dropped) since it's still harmless historical data and
+-- dropping it is out of scope for this migration.
+alter table documents alter column session_id drop not null;
+
+drop policy if exists "anon can insert documents" on documents;
+drop policy if exists "anon can read documents" on documents;
+drop policy if exists "anon can delete documents" on documents;
+
+drop policy if exists "authenticated users can read own or shared documents" on documents;
+create policy "authenticated users can read own or shared documents" on documents
+  for select to authenticated using (user_id is null or auth.uid() = user_id);
+
+drop policy if exists "authenticated users can insert own documents" on documents;
+create policy "authenticated users can insert own documents" on documents
+  for insert to authenticated with check (auth.uid() = user_id);
+
+drop policy if exists "authenticated users can update own documents" on documents;
+create policy "authenticated users can update own documents" on documents
+  for update to authenticated using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+drop policy if exists "authenticated users can delete own documents" on documents;
+create policy "authenticated users can delete own documents" on documents
+  for delete to authenticated using (auth.uid() = user_id);
+
+-- chunks has no user_id of its own - ownership is mediated through the
+-- parent document via an EXISTS subquery, same null-is-shared rule.
+drop policy if exists "anon can insert chunks" on chunks;
+drop policy if exists "anon can read chunks" on chunks;
+drop policy if exists "anon can delete chunks" on chunks;
+drop policy if exists "anon can update chunks" on chunks;
+
+drop policy if exists "authenticated users can read chunks of visible documents" on chunks;
+create policy "authenticated users can read chunks of visible documents" on chunks
+  for select to authenticated using (
+    exists (
+      select 1 from documents
+      where documents.id = chunks.document_id
+        and (documents.user_id is null or documents.user_id = auth.uid())
+    )
+  );
+
+drop policy if exists "authenticated users can insert chunks into own documents" on chunks;
+create policy "authenticated users can insert chunks into own documents" on chunks
+  for insert to authenticated with check (
+    exists (
+      select 1 from documents
+      where documents.id = chunks.document_id
+        and documents.user_id = auth.uid()
+    )
+  );
+
+drop policy if exists "authenticated users can update chunks of own documents" on chunks;
+create policy "authenticated users can update chunks of own documents" on chunks
+  for update to authenticated using (
+    exists (
+      select 1 from documents
+      where documents.id = chunks.document_id
+        and documents.user_id = auth.uid()
+    )
+  );
+
+drop policy if exists "authenticated users can delete chunks of own documents" on chunks;
+create policy "authenticated users can delete chunks of own documents" on chunks
+  for delete to authenticated using (
+    exists (
+      select 1 from documents
+      where documents.id = chunks.document_id
+        and documents.user_id = auth.uid()
+    )
+  );
+
+-- 10. clusters / graph_state: pure derived cache data keyed by the old
+-- meaningless anonymous session_id. Dropped and recreated rather than
+-- migrated - a "Re-analyze" click fully regenerates them, so there's no
+-- real content lost (unlike documents/chunks).
+alter table chunks drop constraint if exists chunks_cluster_id_fkey;
+update chunks set cluster_id = null;
+drop table if exists clusters cascade;
+drop table if exists graph_state cascade;
+
+create table clusters (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  label text not null,
+  color_index int not null,
+  created_at timestamptz not null default now()
+);
+
+alter table chunks add constraint chunks_cluster_id_fkey
+  foreign key (cluster_id) references clusters(id) on delete set null;
+
+create table graph_state (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  last_clustered_at timestamptz not null
+);
+
+create index if not exists clusters_user_id_idx on clusters (user_id);
+
+alter table clusters enable row level security;
+alter table graph_state enable row level security;
+
+drop policy if exists "authenticated users can insert own clusters" on clusters;
+create policy "authenticated users can insert own clusters" on clusters
+  for insert to authenticated with check (auth.uid() = user_id);
+drop policy if exists "authenticated users can read own clusters" on clusters;
+create policy "authenticated users can read own clusters" on clusters
+  for select to authenticated using (auth.uid() = user_id);
+drop policy if exists "authenticated users can delete own clusters" on clusters;
+create policy "authenticated users can delete own clusters" on clusters
+  for delete to authenticated using (auth.uid() = user_id);
+
+drop policy if exists "authenticated users can insert own graph_state" on graph_state;
+create policy "authenticated users can insert own graph_state" on graph_state
+  for insert to authenticated with check (auth.uid() = user_id);
+drop policy if exists "authenticated users can update own graph_state" on graph_state;
+create policy "authenticated users can update own graph_state" on graph_state
+  for update to authenticated using (auth.uid() = user_id) with check (auth.uid() = user_id);
+drop policy if exists "authenticated users can read own graph_state" on graph_state;
+create policy "authenticated users can read own graph_state" on graph_state
+  for select to authenticated using (auth.uid() = user_id);
+
+-- 11. Retrieval RPC: RLS on chunks/documents now enforces "own + legacy"
+-- automatically for any caller (this function is SECURITY INVOKER, the
+-- default), so the id parameter match_chunks_by_session used to take is
+-- pure redundancy now - the database already enforces it, the client
+-- can't get it wrong. Renamed to make that explicit.
+drop function if exists match_chunks_by_session(vector, uuid, int);
+
+create or replace function match_chunks_for_caller(
+  query_embedding vector(384),
+  match_count int default 3
+)
+returns table (
+  id bigint,
+  document_id uuid,
+  document_name text,
+  content text,
+  chunk_index int,
+  similarity float
+)
+language sql stable
+as $$
+  select
+    chunks.id,
+    chunks.document_id,
+    documents.name as document_name,
+    chunks.content,
+    chunks.chunk_index,
+    1 - (chunks.embedding <=> query_embedding) as similarity
+  from chunks
+  join documents on documents.id = chunks.document_id
+  order by chunks.embedding <=> query_embedding
+  limit match_count;
+$$;
