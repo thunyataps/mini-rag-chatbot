@@ -6,6 +6,15 @@ export interface ChunkPoint {
   content: string;
   embedding: number[];
   clusterId: string | null;
+  /**
+   * False for "legacy" chunks - those whose parent document predates login
+   * (`documents.user_id is null`) and so is readable by every signed-in user
+   * but writable by none. The chunks UPDATE policy requires
+   * `documents.user_id = auth.uid()`, so a `cluster_id` write against a
+   * legacy chunk silently matches 0 rows. Clustering therefore skips them
+   * entirely; they still render as graph nodes, just uncategorized.
+   */
+  isOwned: boolean;
 }
 
 export interface ClusterRow {

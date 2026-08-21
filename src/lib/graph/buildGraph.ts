@@ -16,7 +16,7 @@ type ChunkWithDocumentRow = {
   // string, not a parsed array - see the parse in fetchChunkPoints.
   embedding: number[] | string;
   cluster_id: string | null;
-  documents: { name: string };
+  documents: { name: string; user_id: string | null };
 };
 
 /** all-MiniLM-L6-v2 (see src/lib/rag/embeddings.ts) is always 384-dimensional. */
@@ -26,7 +26,7 @@ export async function fetchChunkPoints(): Promise<ChunkPoint[]> {
   const { data, error } = await supabase
     .from("chunks")
     .select(
-      "id, document_id, chunk_index, content, embedding, cluster_id, documents!inner(name)"
+      "id, document_id, chunk_index, content, embedding, cluster_id, documents!inner(name, user_id)"
     );
   if (error) throw new Error(error.message);
 
@@ -51,15 +51,28 @@ export async function fetchChunkPoints(): Promise<ChunkPoint[]> {
       content: row.content,
       embedding,
       clusterId: row.cluster_id,
+      // RLS guarantees every row returned here belongs to a document that is
+      // either legacy (user_id is null) or owned by the caller - nobody
+      // else's private documents are visible at all. So a non-null user_id
+      // means "owned by whoever is asking", by construction.
+      isOwned: row.documents.user_id !== null,
     };
   });
 }
 
-/** Stale if clustering has never run for this user, or if any chunk has
- * never been assigned a cluster (i.e. a document was filed since the last
- * run). Simpler and more robust than comparing timestamps. */
+/** Stale if clustering has never run for this user, or if any *owned* chunk
+ * has never been assigned a cluster (i.e. a document was filed since the
+ * last run). Simpler and more robust than comparing timestamps.
+ *
+ * Legacy chunks are excluded deliberately: they can never be assigned a
+ * cluster (RLS makes them read-only), so counting them here would make this
+ * return true on every single load - re-running k-means and re-spending
+ * Gemini quota forever. */
 export async function needsRecompute(userId: string, chunks: ChunkPoint[]): Promise<boolean> {
-  if (chunks.length === 0) return false;
+  const ownedChunks = chunks.filter((c) => c.isOwned);
+  // Below 2 owned chunks recomputeClusters is a no-op anyway, so there is
+  // nothing a recompute could fix.
+  if (ownedChunks.length < 2) return false;
 
   const { data, error } = await supabase
     .from("graph_state")
@@ -69,15 +82,20 @@ export async function needsRecompute(userId: string, chunks: ChunkPoint[]): Prom
   if (error) throw new Error(error.message);
   if (!data) return true;
 
-  return chunks.some((c) => c.clusterId === null);
+  return ownedChunks.some((c) => c.clusterId === null);
 }
 
 export async function recomputeClusters(userId: string, chunks: ChunkPoint[]): Promise<void> {
-  if (chunks.length < 2) return;
+  // Only the caller's own chunks are clusterable - the chunks UPDATE policy
+  // rejects (silently, as a 0-row match) any write to a legacy chunk, so
+  // feeding them to k-means would just produce assignments that never
+  // persist. They stay uncategorized and render in a neutral color.
+  const ownedChunks = chunks.filter((c) => c.isOwned);
+  if (ownedChunks.length < 2) return;
 
-  const k = Math.min(8, Math.max(2, Math.round(Math.sqrt(chunks.length / 2))));
+  const k = Math.min(8, Math.max(2, Math.round(Math.sqrt(ownedChunks.length / 2))));
   const { assignments, centroids } = kmeans(
-    chunks.map((c) => c.embedding),
+    ownedChunks.map((c) => c.embedding),
     k
   );
 
@@ -86,11 +104,11 @@ export async function recomputeClusters(userId: string, chunks: ChunkPoint[]): P
     const centroid = centroids[clusterIndex];
     let dist = 0;
     for (let d = 0; d < centroid.length; d++) {
-      const diff = centroid[d] - chunks[i].embedding[d];
+      const diff = centroid[d] - ownedChunks[i].embedding[d];
       dist += diff * diff;
     }
     const list = samplesByCluster.get(clusterIndex) ?? [];
-    list.push({ content: chunks[i].content, dist });
+    list.push({ content: ownedChunks[i].content, dist });
     samplesByCluster.set(clusterIndex, list);
   });
 
@@ -152,7 +170,7 @@ export async function recomputeClusters(userId: string, chunks: ChunkPoint[]): P
       supabase
         .from("chunks")
         .update({ cluster_id: clusterIndexToDbId.get(clusterIndex) })
-        .eq("id", chunks[i].id)
+        .eq("id", ownedChunks[i].id)
     )
   );
   const updateError = updateResults.find((r) => r.error)?.error;
