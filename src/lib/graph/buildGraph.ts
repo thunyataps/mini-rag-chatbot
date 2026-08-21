@@ -116,7 +116,7 @@ export async function recomputeClusters(sessionId: string, chunks: ChunkPoint[])
     clusterIndexToDbId.set(clusterIndex, row.id);
   }
 
-  await Promise.all(
+  const updateResults = await Promise.all(
     assignments.map((clusterIndex, i) =>
       supabase
         .from("chunks")
@@ -124,6 +124,8 @@ export async function recomputeClusters(sessionId: string, chunks: ChunkPoint[])
         .eq("id", chunks[i].id)
     )
   );
+  const updateError = updateResults.find((r) => r.error)?.error;
+  if (updateError) throw new Error(updateError.message);
 
   const { error: upsertError } = await supabase
     .from("graph_state")
