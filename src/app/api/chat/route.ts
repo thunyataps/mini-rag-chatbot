@@ -1,44 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { GoogleGenAI } from "@google/genai";
-
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-
-/**
- * Free-tier rate limits (RPM/TPM/RPD) are tracked per model, independently -
- * using up gemini-3.6-flash's quota doesn't touch gemini-3.5-flash's. So on
- * a 429 (rate limited) or 503 (overloaded) we just retry the same request
- * against the next model in this list instead of failing the request.
- * Verified working against this project's API key; gemini-2.5-flash and
- * gemini-2.5-flash-lite are deliberately excluded - Google retired them
- * ("no longer available to new users", 404).
- */
-const MODEL_FALLBACK_CHAIN = [
-  "gemini-3.6-flash",
-  "gemini-3.5-flash",
-  "gemini-3.1-flash-lite",
-  "gemini-3.5-flash-lite",
-  "gemini-flash-lite-latest",
-  "gemini-3.7-flash",
-  "gemini-flash-latest",
-];
-
-async function startGeminiStream(question: string, systemPrompt: string) {
-  let lastErr: unknown;
-  for (const model of MODEL_FALLBACK_CHAIN) {
-    try {
-      const stream = await ai.models.generateContentStream({
-        model,
-        contents: question,
-        config: { systemInstruction: systemPrompt, temperature: 0.2 },
-      });
-      return { stream, model };
-    } catch (err) {
-      console.error(`Gemini model "${model}" failed, trying next:`, err);
-      lastErr = err;
-    }
-  }
-  throw lastErr;
-}
+import { streamWithFallback } from "@/lib/gemini";
 
 /**
  * RAG concept: augmented generation.
@@ -77,7 +38,7 @@ ${context}`;
 
   let geminiStream;
   try {
-    const result = await startGeminiStream(question, systemPrompt);
+    const result = await streamWithFallback(question, systemPrompt);
     geminiStream = result.stream;
     console.log(`Answering with model: ${result.model}`);
   } catch (err) {
