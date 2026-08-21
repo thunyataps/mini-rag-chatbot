@@ -103,6 +103,9 @@ create policy "anon can insert documents" on documents
 drop policy if exists "anon can read documents" on documents;
 create policy "anon can read documents" on documents
   for select to anon using (true);
+drop policy if exists "anon can delete documents" on documents;
+create policy "anon can delete documents" on documents
+  for delete to anon using (true);
 
 drop policy if exists "anon can insert chunks" on chunks;
 create policy "anon can insert chunks" on chunks
@@ -110,6 +113,9 @@ create policy "anon can insert chunks" on chunks
 drop policy if exists "anon can read chunks" on chunks;
 create policy "anon can read chunks" on chunks
   for select to anon using (true);
+drop policy if exists "anon can delete chunks" on chunks;
+create policy "anon can delete chunks" on chunks
+  for delete to anon using (true);
 
 -- 8. Knowledge graph: semantic clusters over a session's chunks, and a
 -- watermark of when they were last computed (see src/lib/graph/buildGraph.ts).
