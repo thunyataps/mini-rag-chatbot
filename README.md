@@ -4,15 +4,29 @@ A chatbot that answers questions using only the content of documents you
 upload — a from-scratch implementation of Retrieval-Augmented Generation
 (RAG), built to learn the mechanics rather than hide them behind a
 framework. No LangChain, no managed vector-search product: chunking,
-embedding, and cosine-similarity retrieval are all plain code you can read
-in `src/lib/rag/`.
+embedding, clustering, and similarity retrieval are all plain code you can
+read in `src/lib/`.
 
 Live demo: https://mini-rag-chatbot-liart.vercel.app
+
+## What it does
+
+- Upload **PDF, Excel (.xlsx/.xls), CSV, or plain text (.txt/.md)** — all
+  parsed client-side, nothing uploaded raw to a server.
+- Ask questions and get **streamed** answers grounded only in what you
+  filed — the model is told to say "I don't know" rather than guess.
+- Retrieval searches **across every document you've filed by default** —
+  no need to pick a file first; an answer can draw on more than one
+  document at once. Scoping to a single file is available as a filter.
+- A **3D knowledge graph** (`/graph`) visualizes how your filed documents
+  and their chunks relate: chunks are auto-clustered into topics (labeled
+  by one batched Gemini call, not one per cluster) and cross-document
+  similarity links show which files talk about the same thing.
 
 ## How RAG works here
 
 ```
- upload (PDF or text)
+ upload (PDF / Excel / CSV / text)
         │
         ▼
    chunk the text            src/lib/rag/chunk.ts
@@ -34,14 +48,14 @@ Live demo: https://mini-rag-chatbot-liart.vercel.app
    embed the question        same model, same vector space
         │
         ▼
-   cosine-similarity search  match_chunks() SQL function
-   over that document's      (pgvector's <=> operator)
-   chunks → top 3 matches
-        │
+   cosine-similarity search  match_chunks_by_session() SQL function
+   across every document     (pgvector's <=> operator; match_chunks()
+   in the session            scopes to one document instead, used when
+        │                     filtering to a single file)
         ▼
-   send question + those     src/app/api/chat/route.ts
-   3 chunks to the LLM,      (Gemini, streamed token by token)
-   answer using ONLY them
+   send question + top       src/lib/gemini.ts + app/api/chat/route.ts
+   matches to the LLM,       (Gemini, streamed token by token, with a
+   answer using ONLY them     model-fallback chain for free-tier quota)
 ```
 
 **Embeddings** turn text into a vector (an array of numbers) that
@@ -53,8 +67,33 @@ vectors pointing in a similar direction, even with no words in common.
 decides which chunks are "relevant" to a question.
 
 **Augmented generation**: the LLM never sees your whole document, and it's
-told to answer *only* from the 3 chunks retrieval found — that's what keeps
-answers grounded in your file instead of the model's general training data.
+told to answer *only* from the top matching chunks retrieval found —
+that's what keeps answers grounded in your files instead of the model's
+general training data.
+
+**Model fallback**: Gemini's free tier rate-limits per model, independently
+(exhausting `gemini-3.6-flash`'s quota doesn't touch `gemini-3.5-flash`'s).
+`src/lib/gemini.ts` retries a request across a chain of models on 429/503
+before failing, so a single busy model doesn't take the app down.
+
+## Knowledge graph (`/graph`)
+
+Clustering runs client-side, cached in Supabase so re-opening the page
+doesn't re-spend Gemini quota:
+
+1. Fetch every chunk + embedding for the session.
+2. Run k-means (`src/lib/graph/kmeans.ts`, plain JS, no ML library) to
+   group chunks into topics.
+3. Send the 3 most-central chunks per cluster to `/api/cluster-labels` in
+   **one batched Gemini call** — never one call per cluster — for a short
+   topic label. A failed label call falls back to generic "Cluster N"
+   names rather than blocking the page.
+4. Cache cluster assignments + labels in Supabase (`clusters`,
+   `graph_state` tables); only recompute when a new document was filed
+   since the last run, or on demand via "Re-analyze".
+5. Render with `3d-force-graph` (three.js): document nodes, chunk nodes
+   colored by cluster, structural links (document → its chunks), and
+   cosine-similarity links between chunks (can cross documents/clusters).
 
 ## Stack
 
@@ -62,9 +101,10 @@ answers grounded in your file instead of the model's general training data.
 |---|---|---|
 | Frontend | Next.js App Router + TypeScript + Tailwind | |
 | Embeddings | Transformers.js (`all-MiniLM-L6-v2`) | Runs client-side, no embedding API/cost |
-| LLM | Gemini (`gemini-3.6-flash`) via `@google/genai` | Free tier, streaming support |
+| LLM | Gemini (model-fallback chain) via `@google/genai` | Free tier, streaming support |
 | Vector storage | Supabase Postgres + `pgvector` | Free tier, SQL-native similarity search |
-| PDF parsing | pdf.js | Runs client-side |
+| File parsing | pdf.js (PDF), SheetJS (Excel) | Runs client-side |
+| 3D graph | `3d-force-graph` (three.js) | Renders the knowledge graph |
 | Deploy | Vercel | Free tier |
 
 ## Running locally
@@ -87,14 +127,34 @@ Open http://localhost:3000.
 
 ### Database setup
 
-Run `supabase/schema.sql` once in the Supabase SQL Editor. It:
+Run `supabase/schema.sql` once in the Supabase SQL Editor (safe to re-run —
+every statement is idempotent). It:
 - enables the `pgvector` extension
 - creates `documents` and `chunks` tables (384-dim embeddings, matching `all-MiniLM-L6-v2`)
-- creates `match_chunks()`, the RPC used for retrieval
-- sets permissive Row Level Security policies scoped only by a client-generated
-  session id (`src/lib/session.ts`) — there's no login system in this project,
-  so **don't upload sensitive documents**; this is a portfolio/learning project,
-  not a document store with real access control.
+- creates `match_chunks()` (single-document) and `match_chunks_by_session()`
+  (searches everything you've filed) — the RPCs used for retrieval
+- creates `clusters` and `graph_state` tables for the knowledge graph, and
+  a `cluster_id` column on `chunks`
+- sets permissive Row Level Security policies scoped only by a
+  client-generated session id (`src/lib/session.ts`) — there's no login
+  system in this project, so **don't upload sensitive documents**; this is
+  a portfolio/learning project, not a document store with real access
+  control. (The `documents`/`chunks` DELETE policies exist only for
+  maintenance/test-cleanup scripts — the app itself never deletes either.)
+
+## Known limitations
+
+- **Embedding runs on the main thread.** A true Web Worker was attempted,
+  but Turbopack (Next.js 16.3.1) doesn't currently bundle the
+  `new Worker(new URL(...))` pattern for production builds — it copies the
+  worker file's raw TypeScript source as a static asset instead of
+  compiling it. Until that's fixed upstream, `embeddings.ts` yields to the
+  event loop between chunks so the page stays responsive between inference
+  calls, and `uploadDocument` caps documents at 2000 chunks so no single
+  file can run indefinitely. Large files (a few-thousand-row spreadsheet)
+  can take a few minutes to index.
+- **No document delete UI.** You can file documents but not remove them
+  from the app itself (cleanup is a maintenance-script-only path — see above).
 
 ## Deploying
 
@@ -110,14 +170,23 @@ vercel --prod
 
 ```
 src/
-  lib/rag/chunk.ts          word-based chunking with overlap
-  lib/rag/embeddings.ts     Transformers.js embedding (browser-side)
-  lib/rag/types.ts          shared RAG types
-  lib/pdf/extractText.ts    client-side PDF → text (pdf.js)
-  lib/supabase/client.ts    Supabase browser client
-  lib/session.ts            per-browser session id (localStorage)
-  hooks/useDocuments.ts     upload/index/ask flow — the RAG pipeline glue
-  app/api/chat/route.ts     calls Gemini, streams the answer back
-  app/page.tsx              UI
-supabase/schema.sql         tables, pgvector, match_chunks() RPC
+  lib/rag/chunk.ts            word-based chunking with overlap
+  lib/rag/embeddings.ts       Transformers.js embedding (browser-side)
+  lib/rag/types.ts            shared RAG types
+  lib/files/extractText.ts    client-side PDF/Excel/CSV/text -> text
+  lib/supabase/client.ts      Supabase browser client
+  lib/session.ts              per-browser session id (localStorage)
+  lib/gemini.ts                shared Gemini client + model-fallback chain
+  lib/graph/kmeans.ts          plain-JS k-means clustering
+  lib/graph/edges.ts           cosine similarity + similarity-edge computation
+  lib/graph/palette.ts         cluster color palette
+  lib/graph/types.ts           shared knowledge-graph types
+  lib/graph/buildGraph.ts      graph orchestration: fetch, cluster, cache, assemble
+  hooks/useDocuments.ts        upload/index/ask flow - the RAG pipeline glue
+  hooks/useGraph.ts            knowledge-graph data + recompute hook
+  app/api/chat/route.ts        calls Gemini, streams the answer back
+  app/api/cluster-labels/route.ts  batched Gemini call for cluster topic labels
+  app/page.tsx                 main UI
+  app/graph/page.tsx            3D knowledge graph page
+supabase/schema.sql            tables, pgvector, RPCs, RLS policies
 ```
