@@ -6,14 +6,18 @@ import { useGraph } from "@/hooks/useGraph";
 import { CLUSTER_PALETTE } from "@/lib/graph/palette";
 import type { GraphNode } from "@/lib/graph/types";
 
+// Fallbacks only - the real colors are read from the --ink/--line CSS custom
+// properties at render time so the graph follows light/dark mode (the canvas
+// is transparent, so the page background shows through behind the nodes).
 const DOCUMENT_COLOR = "#1b2e2b";
+const LINK_COLOR = "#c9bfa0";
 const NEUTRAL_CHUNK_COLOR = "#8a8a7a";
 
 export default function GraphPage() {
   const { data, isLoading, isRecomputing, error, recompute } = useGraph();
   const containerRef = useRef<HTMLDivElement>(null);
-  // 3d-force-graph ships no first-party TypeScript types for this usage
-  // pattern; `any` here is the instantiated imperative graph object.
+  // `any` here is the instantiated imperative graph object - see the cast
+  // inside the effect below for why it can't be typed from the shipped .d.ts.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const graphInstanceRef = useRef<any>(null);
   const [selected, setSelected] = useState<GraphNode | null>(null);
@@ -24,13 +28,17 @@ export default function GraphPage() {
 
     let disposed = false;
 
+    const styles = getComputedStyle(document.documentElement);
+    const inkColor = styles.getPropertyValue("--ink").trim() || DOCUMENT_COLOR;
+    const lineColor = styles.getPropertyValue("--line").trim() || LINK_COLOR;
+
     import("3d-force-graph").then((mod) => {
       if (disposed) return;
 
-      // Cast to `any`: the shipped .d.ts hard-codes generic NodeObject/
-      // LinkObject types that don't include this project's GraphNode/
-      // GraphEdge shape, so the typed surface can't express the chainable
-      // accessor API used below (see comment on graphInstanceRef above).
+      // Cast to `any`: the shipped .d.ts declares the default export only as
+      // a `new (element, ...)` constructor, but the installed library is
+      // Kapsule-based at runtime and is called as the factory form used here
+      // (`ForceGraph3D()(container)`), which that declaration can't express.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const ForceGraph3D = mod.default as any;
       const graph = ForceGraph3D()(container)
@@ -42,7 +50,7 @@ export default function GraphPage() {
           node.kind === "document" ? node.name : (node.content ?? node.name).slice(0, 80)
         )
         .nodeColor((node: GraphNode) => {
-          if (node.kind === "document") return DOCUMENT_COLOR;
+          if (node.kind === "document") return inkColor;
           return node.colorIndex != null
             ? CLUSTER_PALETTE[node.colorIndex % CLUSTER_PALETTE.length]
             : NEUTRAL_CHUNK_COLOR;
@@ -50,7 +58,7 @@ export default function GraphPage() {
         .nodeVal((node: GraphNode) => (node.kind === "document" ? 8 : 2))
         .linkOpacity((link: { kind: string }) => (link.kind === "structural" ? 0.15 : 0.4))
         .linkColor((link: { kind: string }) =>
-          link.kind === "structural" ? "#c9bfa0" : "#9c6a1e"
+          link.kind === "structural" ? lineColor : CLUSTER_PALETTE[0]
         )
         .onNodeClick((node: GraphNode) => setSelected(node))
         .backgroundColor("rgba(0,0,0,0)");
@@ -67,8 +75,21 @@ export default function GraphPage() {
 
     return () => {
       disposed = true;
+      // Clearing innerHTML only detaches the canvas - the renderer's animation
+      // loop and its WebGL context keep running. Since this effect re-runs on
+      // every recompute, skipping the destructor would strand a live GL context
+      // each time (browsers cap concurrent contexts at ~16).
+      if (graphInstanceRef.current && typeof graphInstanceRef.current._destructor === "function") {
+        graphInstanceRef.current._destructor();
+      }
       container.innerHTML = "";
       graphInstanceRef.current = null;
+      // Tearing down this graph also invalidates anything the side panel is
+      // showing - after a "Re-analyze" the selected node belongs to the old
+      // graph and can carry a stale cluster label. (Done here rather than at
+      // the top of the effect body: React forbids a synchronous setState
+      // there, and the cleanup runs on exactly the same `data` changes.)
+      setSelected(null);
     };
   }, [data]);
 
