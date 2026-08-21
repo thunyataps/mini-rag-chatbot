@@ -19,16 +19,28 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     let cancelled = false;
 
-    supabase.auth.getUser().then(({ data }) => {
-      if (cancelled) return;
-      setUser(data.user);
-      setIsLoading(false);
-    });
+    supabase.auth
+      .getUser()
+      .then(({ data }) => {
+        if (cancelled) return;
+        setUser(data.user);
+        setIsLoading(false);
+      })
+      .catch(() => {
+        // A network failure here must still resolve the loading state -
+        // otherwise isLoading is stuck true forever plus an unhandled
+        // rejection. Staying signed-out is the safe interpretation.
+        if (!cancelled) setIsLoading(false);
+      });
 
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((_event, session) => {
-      setUser(session?.user ?? null);
+      // TOKEN_REFRESHED (hourly) and the SIGNED_IN Supabase re-emits on tab
+      // focus both hand back a brand-new User object for the same person.
+      // Keeping the previous object identity when the id is unchanged stops
+      // those routine events from re-triggering every consumer's fetch.
+      setUser((prev) => (prev?.id === session?.user?.id ? prev : session?.user ?? null));
     });
 
     return () => {

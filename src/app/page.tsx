@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useRef, useState } from "react";
 import { useDocuments } from "@/hooks/useDocuments";
 import { useAuth } from "@/hooks/useAuth";
@@ -10,6 +11,7 @@ import type { RetrievedChunk } from "@/lib/rag/types";
 const MAX_FILE_BYTES = 15 * 1024 * 1024; // 15 MB
 
 export default function Home() {
+  const router = useRouter();
   const { user, signOut } = useAuth();
   const {
     documents,
@@ -69,6 +71,15 @@ export default function Home() {
     }
   }
 
+  /** Navigating away (rather than just clearing the session) is what drops
+   * the previous user's documents/graph from React state - otherwise their
+   * data stays on screen until the next full page load. */
+  async function handleSignOut() {
+    await signOut();
+    router.push("/login");
+    router.refresh();
+  }
+
   async function handleAsk() {
     setError(null);
     setSources([]);
@@ -112,7 +123,7 @@ export default function Home() {
             </Link>
             <div className="flex items-center gap-2 font-mono text-[11px] text-ink-soft">
               {user?.email}
-              <button onClick={() => signOut()} className="underline decoration-dotted underline-offset-2 hover:text-ink">
+              <button onClick={handleSignOut} className="underline decoration-dotted underline-offset-2 hover:text-ink">
                 Sign out
               </button>
             </div>

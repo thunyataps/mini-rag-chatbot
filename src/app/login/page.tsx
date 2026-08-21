@@ -1,17 +1,36 @@
 "use client";
 
-import { useState } from "react";
-import { useRouter } from "next/navigation";
+import { Suspense, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { supabase } from "@/lib/supabase/client";
 
 type Mode = "sign-in" | "sign-up";
 
+/** Errors handed back by /auth/callback when a code exchange fails. */
+const CALLBACK_ERRORS: Record<string, string> = {
+  "auth-code-error":
+    "That link has expired or has already been used — try signing in again.",
+};
+
+/** useSearchParams() forces anything that calls it into a Suspense boundary,
+ * so the page shell stays a plain wrapper and the form lives inside it. */
 export default function LoginPage() {
+  return (
+    <Suspense fallback={<LoginShell />}>
+      <LoginForm />
+    </Suspense>
+  );
+}
+
+function LoginForm() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [mode, setMode] = useState<Mode>("sign-in");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(
+    () => CALLBACK_ERRORS[searchParams.get("error") ?? ""] ?? null
+  );
   const [info, setInfo] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -112,6 +131,19 @@ export default function LoginPage() {
 
         {error && <p className="mt-4 text-sm text-danger">{error}</p>}
         {info && <p className="mt-4 text-sm text-ink-soft">{info}</p>}
+      </div>
+    </div>
+  );
+}
+
+/** Suspense fallback: the same card chrome, so the page doesn't flash empty
+ * while the form (which reads search params) resolves. */
+function LoginShell() {
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-paper px-4">
+      <div className="w-full max-w-sm rounded border border-line bg-card p-6">
+        <h1 className="font-display text-2xl text-ink">Mini RAG Chatbot</h1>
+        <p className="mt-1 font-mono text-[11px] text-ink-soft">Loading…</p>
       </div>
     </div>
   );

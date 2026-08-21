@@ -30,7 +30,7 @@ type MatchChunksRow = {
   similarity: number;
 };
 
-type MatchChunksBySessionRow = MatchChunksRow & {
+type MatchChunksForCallerRow = MatchChunksRow & {
   document_id: string;
   document_name: string;
 };
@@ -50,6 +50,10 @@ type MatchChunksBySessionRow = MatchChunksRow & {
  */
 export function useDocuments() {
   const { user } = useAuth();
+  // Depend on the id, not the User object: Supabase hands back a fresh
+  // object on every token refresh / tab-focus re-emit, which would otherwise
+  // re-run the fetch effect and rebuild uploadDocument for no reason.
+  const userId = user?.id;
   const [documents, setDocuments] = useState<DocumentRecord[]>([]);
   const [searchScope, setSearchScope] = useState<SearchScope>("all");
   const [isLoadingDocuments, setIsLoadingDocuments] = useState(true);
@@ -75,7 +79,7 @@ export function useDocuments() {
   }, []);
 
   useEffect(() => {
-    if (!user) return;
+    if (!userId) return;
     let cancelled = false;
 
     async function load() {
@@ -90,10 +94,14 @@ export function useDocuments() {
     return () => {
       cancelled = true;
     };
-  }, [refreshDocuments, user]);
+  }, [refreshDocuments, userId]);
 
   const uploadDocument = useCallback(
     async (name: string, text: string) => {
+      // Reachable if the session drops while the tab is open - without this
+      // the user!.id below throws a raw TypeError straight into the UI.
+      if (!userId) throw new Error("You're signed out — please sign in again.");
+
       const rawChunks = chunkText(text);
       if (rawChunks.length === 0) {
         throw new Error("Document is empty");
@@ -109,7 +117,7 @@ export function useDocuments() {
       try {
         const { data: doc, error: docError } = await supabase
           .from("documents")
-          .insert({ user_id: user!.id, name })
+          .insert({ user_id: userId, name })
           .select("id, name, created_at")
           .single();
         if (docError) throw new Error(docError.message);
@@ -134,7 +142,7 @@ export function useDocuments() {
         setIsUploading(false);
       }
     },
-    [refreshDocuments, user]
+    [refreshDocuments, userId]
   );
 
   const askQuestion = useCallback(
@@ -161,7 +169,7 @@ export function useDocuments() {
           });
           if (error) throw new Error(error.message);
 
-          sources = ((data ?? []) as MatchChunksBySessionRow[]).map((row) => ({
+          sources = ((data ?? []) as MatchChunksForCallerRow[]).map((row) => ({
             content: row.content,
             chunkIndex: row.chunk_index,
             similarity: row.similarity,

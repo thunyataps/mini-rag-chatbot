@@ -32,7 +32,12 @@ export async function updateSession(request: NextRequest) {
   const { data, error } = await supabase.auth.getClaims();
   const isAuthenticated = !error && !!data?.claims;
 
-  const isPublicPath = PUBLIC_PATHS.some((path) => request.nextUrl.pathname.startsWith(path));
+  // Exact-or-segment match, not a bare prefix: a future "/login-help" or
+  // "/auth/callback-debug" route must not become public by accident.
+  const { pathname } = request.nextUrl;
+  const isPublicPath = PUBLIC_PATHS.some(
+    (path) => pathname === path || pathname.startsWith(path + "/")
+  );
 
   if (!isAuthenticated && !isPublicPath) {
     const url = request.nextUrl.clone();

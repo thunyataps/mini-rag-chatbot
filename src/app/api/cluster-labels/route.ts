@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { generateJsonWithFallback } from "@/lib/gemini";
+import { createClient } from "@/lib/supabase/server";
 
 interface ClusterSample {
   id: number;
@@ -28,6 +29,16 @@ const RESPONSE_SCHEMA = {
  * free-tier RPM/RPD is too scarce to spend per-cluster (see src/lib/gemini.ts).
  */
 export async function POST(req: NextRequest) {
+  // Self-defending, not relying on Proxy's matcher alone - see the same
+  // check in app/api/chat/route.ts.
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   const { clusters } = (await req.json()) as { clusters: ClusterSample[] };
 
   if (!Array.isArray(clusters) || clusters.length === 0) {

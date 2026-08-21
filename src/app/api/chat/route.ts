@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { streamWithFallback } from "@/lib/gemini";
+import { createClient } from "@/lib/supabase/server";
 
 /**
  * RAG concept: augmented generation.
@@ -16,6 +17,19 @@ import { streamWithFallback } from "@/lib/gemini";
  * instead of waiting for the full answer.
  */
 export async function POST(req: NextRequest) {
+  // Self-defending, not relying on Proxy's matcher alone: an edit to the
+  // matcher must never be able to turn this into an open, unauthenticated
+  // proxy onto the server's Gemini key. It also means a request arriving
+  // with a stale session cookie gets a clean 401 JSON error instead of
+  // being redirected to /login and streamed into the chat UI as HTML.
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   const { question, context } = await req.json();
 
   if (!question || typeof question !== "string") {
