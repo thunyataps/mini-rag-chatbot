@@ -1,12 +1,17 @@
 -- Mini RAG Chatbot - schema
 -- Run this in the Supabase SQL Editor (Project -> SQL Editor -> New query).
--- Safe to re-run: every statement is idempotent (if not exists / or replace).
+-- Safe to re-run: every statement is idempotent in its final effect, though
+-- section 10 (clusters / graph_state) resets cached clustering data on each
+-- re-run - it nulls every chunk's cluster_id and drops/recreates both cache
+-- tables. Document and chunk content is never touched; a "Re-analyze" click
+-- regenerates the cluster cache.
 
 -- 1. Enable pgvector (stores embeddings as a native Postgres type).
 create extension if not exists vector;
 
 -- 2. One row per uploaded document (PDF, Excel, CSV, or pasted text).
--- session_id groups documents by browser (no login in this project - see README).
+-- session_id grouped documents by browser back when there was no login;
+-- section 9 retires it in favour of a real user_id (see README).
 create table if not exists documents (
   id uuid primary key default gen_random_uuid(),
   session_id uuid not null,
@@ -30,7 +35,8 @@ create index if not exists chunks_embedding_idx
   on chunks using hnsw (embedding vector_cosine_ops);
 
 create index if not exists chunks_document_id_idx on chunks (document_id);
-create index if not exists documents_session_id_idx on documents (session_id);
+-- (documents used to be indexed on session_id here; section 9 replaces that
+-- with an index on user_id and drops the dead one.)
 
 -- 5. RPC: retrieval scoped to one document (used when the UI is filtered to
 -- a single file). Cosine similarity via pgvector's <=> operator.
@@ -91,9 +97,9 @@ as $$
   limit match_count;
 $$;
 
--- 7. RLS: this project has no login system, so access is scoped only by the
--- client-generated session_id (see src/lib/session.ts), not enforced server-side.
--- Fine for a portfolio project - do not store sensitive documents.
+-- 7. RLS, original anonymous-session version - SUPERSEDED by section 9,
+-- which replaces every policy below with real auth.uid() ownership checks.
+-- Kept only so this file still reads as the full migration history.
 alter table documents enable row level security;
 alter table chunks enable row level security;
 
@@ -175,6 +181,12 @@ alter table documents add column if not exists user_id uuid references auth.user
 -- in place (not dropped) since it's still harmless historical data and
 -- dropping it is out of scope for this migration.
 alter table documents alter column session_id drop not null;
+
+-- user_id is now the filter column in the documents SELECT policy and in the
+-- EXISTS subquery of all four chunks policies, so it needs its own index.
+-- session_id's index is dead weight now that nothing filters on it.
+create index if not exists documents_user_id_idx on documents (user_id);
+drop index if exists documents_session_id_idx;
 
 drop policy if exists "anon can insert documents" on documents;
 drop policy if exists "anon can read documents" on documents;
