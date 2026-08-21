@@ -1,26 +1,100 @@
 @import "tailwindcss";
 
+/*
+  Design concept: a library card catalog. RAG is literally "pull the index
+  cards that match, then answer from what's on them" - so retrieved chunks
+  render as punched index cards with a stamped similarity score, documents
+  are filed like folders, and questions go in on a request slip.
+*/
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --paper: #e9e2cc;
+  --card: #f6f1e4;
+  --ink: #1b2e2b;
+  --ink-soft: #52685f;
+  --stamp: #9c6a1e;
+  --line: #c9bfa0;
+  --danger: #8a3324;
+  --danger-bg: #f1ded4;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-paper: var(--paper);
+  --color-card: var(--card);
+  --color-ink: var(--ink);
+  --color-ink-soft: var(--ink-soft);
+  --color-stamp: var(--stamp);
+  --color-line: var(--line);
+  --color-danger: var(--danger);
+  --color-danger-bg: var(--danger-bg);
+  --font-display: var(--font-display);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+    --paper: #141f1b;
+    --card: #1c2925;
+    --ink: #e9e2cc;
+    --ink-soft: #96a89d;
+    --stamp: #d9a64e;
+    --line: #35443c;
+    --danger: #dc9484;
+    --danger-bg: #2c1c17;
   }
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+  /* faint paper grain, no image assets */
+  background-image: radial-gradient(
+    color-mix(in srgb, var(--ink) 7%, transparent) 0.6px,
+    transparent 0.6px
+  );
+  background-size: 16px 16px;
+  color-scheme: light dark;
+}
+
+::selection {
+  background: var(--stamp);
+  color: var(--card);
+}
+
+/* index-card "punch hole" */
+.card-punch {
+  position: absolute;
+  top: 0.6rem;
+  left: 0.75rem;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 9999px;
+  background: var(--paper);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.25);
+}
+
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-rise-in {
+  animation: rise-in 0.4s ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-rise-in {
+    animation: none;
+  }
+  * {
+    transition-duration: 0.01ms !important;
+  }
 }

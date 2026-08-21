@@ -1,5 +1,5 @@
 {
-  "name": "tmp-app",
+  "name": "mini-rag-chatbot",
   "version": "0.1.0",
   "private": true,
   "scripts": {
@@ -9,9 +9,14 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@google/genai": "^2.18.0",
+    "@huggingface/transformers": "^4.2.0",
+    "@supabase/supabase-js": "^2.112.3",
     "next": "16.3.1",
+    "pdfjs-dist": "^6.2.108",
     "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "react-dom": "19.2.8",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-latest/xlsx-latest.tgz"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
